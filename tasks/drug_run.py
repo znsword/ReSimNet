@@ -15,7 +15,7 @@ from sklearn.metrics import precision_score, roc_auc_score
 
 from datetime import datetime
 from torch.autograd import Variable
-from models.root.utils import *
+from utils import *
 
 
 LOGGER = logging.getLogger(__name__)
@@ -236,8 +236,9 @@ def run_reg(model, loader, dataset, args, metric, train=False):
             outputs, embed1, embed2 = model(d1_r.to(device), d1_l,
                                             d2_r.to(device), d2_l,
                                             None, None)
-        loss = model.get_loss(outputs, score.cuda())
-        stats['loss'] += [loss.data[0]]
+        device = next(model.parameters()).device
+        loss = model.get_loss(outputs, score.to(device))
+        stats['loss'] += [loss.item()]
         total_step += 1.0
 
         # Metrics for regression
@@ -372,6 +373,8 @@ def precision_at_k(y_pred, y_true, k):
     #print(topk)
     #print(topk_true)
     #print(topk_pred)
+    if len(topk_true) == 0:
+        return float('nan')
     precisionk = precision_score([1 if x > 0.9 else 0 for x in topk_true],
                                  [1 if x > -1.0 else 0 for x in topk_pred], labels=[0,1], pos_label=1)
     # print([1 if x > 90.0 else 0 for x in topk_true])
@@ -393,7 +396,11 @@ def evaluation(y_pred, y_true):
     # print(y_pred)
     # print(y_true)
     # print(pearsonr(np.ravel(y_pred), y_true))
-    corr = pearsonr(np.ravel(y_pred), y_true)[0]
+    y_pred_flat = np.ravel(y_pred)
+    if len(y_pred_flat) >= 2 and len(y_true) >= 2:
+        corr = pearsonr(y_pred_flat, y_true)[0]
+    else:
+        corr = float('nan')
     # mse = np.square(np.subtract(y_pred, y_true)).mean()
     msetotal = mse_at_k(y_pred, y_true, 1.0)
     mse1 = mse_at_k(y_pred, y_true, 0.01)
@@ -401,7 +408,9 @@ def evaluation(y_pred, y_true):
     mse5 = mse_at_k(y_pred, y_true, 0.05)
 
     auroc = float('nan')
-    if len([x for x in y_true if x > 0.9]) > 0:
+    pos_cnt = len([x for x in y_true if x > 0.9])
+    neg_cnt = len([x for x in y_true if x <= 0.9])
+    if pos_cnt > 0 and neg_cnt > 0:
         auroc = roc_auc_score([1 if x > 0.9 else 0 for x in y_true], y_pred)
     precision1 = precision_at_k(y_pred, y_true, 0.01)
     precision2 = precision_at_k(y_pred, y_true, 0.02)
@@ -494,201 +503,6 @@ def save_prediction(model, loader, dataset, args):
 
         # Print progress
         if d_idx % args.print_step == 0 or d_idx == len(loader) - 1:
-            _progress = '{}/{} saving drug predictions..'.format(
+            _progress = '{}/{} saving test set predictions..'.format(
                 d_idx + 1, len(loader))
             LOGGER.info(_progress)
-
-# Outputs pred vs label scores given a dataloader
-def perform_ensemble(model, loader, dataset, args):
-    model.eval()
-    tar_set = []
-    pred_set = []
-    kk_tar_set = []
-    kk_pred_set = []
-    ku_tar_set = []
-    ku_pred_set = []
-    uu_tar_set = []
-    uu_pred_set = []
-
-    for d_idx, (d1, d1_r, d1_l, d2, d2_r, d2_l, score) in enumerate(loader):
-        # Run model for getting predictions
-        device = next(model.parameters()).device
-        outputs, _, _ = model(d1_r.to(device), d1_l, d2_r.to(device), d2_l, None, None)
-
-        # Split for KK/KU/UU sets
-        kk_idx = np.argwhere([a in dataset.known and b in dataset.known
-                              for a, b in zip(d1, d2)]).flatten()
-        ku_idx = np.argwhere([(a in dataset.known) != (b in dataset.known)
-                              for a, b in zip(d1, d2)]).flatten()
-        uu_idx = np.argwhere([a not in dataset.known and b not in dataset.known
-                              for a, b in zip(d1, d2)]).flatten()
-        assert len(kk_idx) + len(ku_idx) + len(uu_idx) == len(d1)
-
-        # Metrics for regression
-        tmp_tar = score.detach().cpu().numpy()
-        tmp_pred = outputs.detach().cpu().numpy()
-
-        # Accumulate for final evaluation
-        tar_set += list(tmp_tar[:])
-        pred_set += list(tmp_pred[:])
-        kk_tar_set += list(tmp_tar[kk_idx])
-        kk_pred_set += list(tmp_pred[kk_idx])
-        ku_tar_set += list(tmp_tar[ku_idx])
-        ku_pred_set += list(tmp_pred[ku_idx])
-        uu_tar_set += list(tmp_tar[uu_idx])
-        uu_pred_set += list(tmp_pred[uu_idx])
-
-    corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5 = evaluation(pred_set, tar_set)
-    print('[TOTAL\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}] '.format(
-        corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5))
-
-    corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5 = evaluation(kk_pred_set, kk_tar_set)
-    print('[KK\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}] '.format(
-        corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5))
-
-    corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5 = evaluation(ku_pred_set, ku_tar_set)
-    print('[KU\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}] '.format(
-        corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5))
-
-    corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5 = evaluation(uu_pred_set, uu_tar_set)
-    print('[UU\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}\t{:.5f}] '.format(
-        corr, msetotal, mse1, mse2, mse5, auroc, precision1, precision2, precision5))
-
-    return pred_set, tar_set, kk_pred_set, kk_tar_set, ku_pred_set, ku_tar_set, uu_pred_set, uu_tar_set
-
-# Outputs pred scores for new pair dataset
-def save_pair_score(model, pair_dir, fp_dir, dataset, args):
-    model.eval()
-    drug2rep = pickle.load(open(fp_dir, 'rb'))
-
-    folder_name = args.checkpoint_dir + 'save_pair_score/'
-    if not os.path.exists(folder_name):
-        os.makedirs(folder_name)
-
-    for subdir, _, files in os.walk(pair_dir):
-        for file_ in sorted(files):
-
-            df = pd.read_csv(os.path.join(subdir, file_), sep=",")
-            #print(df)
-            LOGGER.info('save_pair_score processing {}...'.format(file_))
-
-            csv_writer = csv.writer(open(folder_name + file_ + '_' +
-                                         args.model_name + '.csv', 'w'))
-            csv_writer.writerow(['drug1', 'drug2', 'prediction', 'jaccard'])
-
-            batch = []
-            for row_idx, row in df.iterrows():
-                drug1 = row['id1']
-                drug1_r = drug2rep[drug1][0]
-                drug1_r = [float(value) for value in list(drug1_r)]
-
-                drug2 = row['id2']
-                drug2_r = drug2rep[drug2][0]
-                drug2_r = [float(value) for value in list(drug2_r)]
-
-                example = [drug1, drug1_r, len(drug1_r),
-                           drug2, drug2_r, len(drug2_r), 0]
-                batch.append(example)
-
-                if len(batch) == 1024:
-                    inputs = dataset.collate_fn(batch)
-        device = next(model.parameters()).device
-        outputs, _, _ = model(inputs[1].to(device), inputs[2], inputs[4].to(device), inputs[5], None, None)
-        predictions = outputs.detach().cpu().numpy()
-
-                    for example, pred in zip(batch, predictions):
-                        from scipy.spatial import distance
-                        def jaccard(a, b):
-                           return 1-distance.jaccard(a, b)
-                        jac = jaccard(example[1], example[4])
-
-                        csv_writer.writerow([example[0], example[3], pred, jac])
-                        print(example[0], example[3], pred, jac)
-
-                    batch = []
-
-                # Print progress
-                if row_idx % 5000 == 0 or row_idx == len(df) - 1:
-                    _progress = '{}/{} saving unknwon predictions..'.format(
-                        row_idx + 1, len(df))
-                    LOGGER.info(_progress)
-
-            if len(batch) > 0:
-                inputs = dataset.collate_fn(batch)
-                outputs, _, _ = model(inputs[1].to(device), inputs[2], inputs[4].to(device), inputs[5], None, None)
-                predictions = outputs.detach().cpu().numpy()
-
-                for example, pred in zip(batch, predictions):
-                    from scipy.spatial import distance
-                    def jaccard(a, b):
-                       return 1-distance.jaccard(a, b)
-                    jac = jaccard(example[1], example[4])
-                    csv_writer.writerow([example[0], example[3], pred, jac])
-
-
-def save_pair_score_for_zinc(model, pair_dir, example_dir, dataset, args):
-    print("\n=============================================================")
-    print("SAVE PAIR SCORE FOR ZINC")
-    print("=============================================================")
-
-    model.eval()
-    df_example = pd.read_csv(example_dir, sep=",")
-    print(df_example)
-
-    folder_name = args.checkpoint_dir + 'save_pair_score_for_zinc/'
-    if not os.path.exists(folder_name):
-        os.makedirs(folder_name)
-
-    for subdir, _, files in os.walk(pair_dir):
-        for file_ in sorted(files):
-
-            df_zinc = pd.read_csv(os.path.join(subdir, file_), sep=",")
-            LOGGER.info('save_pair_score processing {}...'.format(file_))
-            csv_writer = csv.writer(open(folder_name + file_ + '_' +
-                                         args.model_name + '.csv', 'w'))
-            csv_writer.writerow(['pair1', 'pair2', 'prediction'])
-
-            batch = []
-            for row_idx, row in df_zinc.iterrows():
-                drug1 = row['zinc_id']
-                drug1_r = row['fingerprint']
-                drug1_r = [float(value) for value in list(drug1_r)]
-
-                for row_idex, row in df_example.iterrows():
-                    try:
-                        drug2 = row['pair']
-                        drug2_r =row['fp']
-                        drug2_r = [float(value) for value in list(drug2_r)]
-                        #print(drug1, drug1_r, len(drug1_r), drug2, drug2_r, len(drug2_r))
-
-                        example = [drug1, drug1_r, len(drug1_r),
-                                   drug2, drug2_r, len(drug2_r), 0]
-                        batch.append(example)
-                    except KeyError:
-                        continue
-
-                    if len(batch) == 4096:
-                        inputs = dataset.collate_fn(batch)
-                        outputs, _, _ = model(inputs[1].to(device), inputs[2], inputs[4].to(device), inputs[5], None, None)
-                        predictions = outputs.detach().cpu().numpy()
-
-                        for example, pred in zip(batch, predictions):
-                            if pred > 0.9:
-                                csv_writer.writerow([example[0], example[3], pred])
-
-                        batch = []
-
-                # Print progress
-                if row_idx % 1000 == 0 or row_idx == len(df_zinc) - 1:
-                    _progress = '{}/{} saving zinc predictions..'.format(
-                        row_idx + 1, len(df_zinc))
-                    LOGGER.info(_progress)
-
-            if len(batch) > 0:
-                inputs = dataset.collate_fn(batch)
-                outputs, _, _ = model(inputs[1].to(device), inputs[2], inputs[4].to(device), inputs[5], None, None)
-                predictions = outputs.detach().cpu().numpy()
-
-                for example, pred in zip(batch, predictions):
-                    if pred > 0.9:
-                        csv_writer.writerow([example[0], example[3], pred])
